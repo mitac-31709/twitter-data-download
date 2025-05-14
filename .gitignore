@@ -1,0 +1,33 @@
+# Node.js のモジュールディレクトリ
+node_modules/
+
+# 環境変数ファイル（Twitter Cookie など）
+.env
+shared/like.js
+
+# ダウンロードしたツイートの保存先
+downloads/
+
+# エラーリストやレート制限状態のJSONファイル
+tweet-downloader/error_tweets.json
+tweet-downloader/rate_limit_state.json
+shared/shared-state.json
+processed-tweets.json
+
+# キャッシュ・ログファイル
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# その他（OS固有のキャッシュ・一時ファイル）
+.DS_Store
+Thumbs.db
+
+# エディタのファイル
+.vscode/
+.cursorignore
+
+# パッケージファイル
+package-lock.json
+package.json
