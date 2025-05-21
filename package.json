@@ -3,7 +3,16 @@
     "cli-progress": "^3.12.0",
     "dotenv": "^16.5.0",
     "fs-extra": "^11.3.0",
+    "node-fetch": "^3.3.2",
     "ora": "^8.2.0",
+    "stream-json": "^1.9.1",
     "twitter-downloader": "^1.1.8"
+  },
+  "scripts": {
+    "download": "node download-all.js",
+    "download-tweets": "node tweet-downloader/download-tweets.js",
+    "download-images": "node image-downloader/download-images.js",
+    "retry-failed": "node retry-failed-tweets.js",
+    "update-state": "node update-state.js"
   }
 }
