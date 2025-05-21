@@ -8,11 +8,20 @@
     "stream-json": "^1.9.1",
     "twitter-downloader": "^1.1.8"
   },
+  "devDependencies": {
+    "@types/cli-progress": "^3.11.5",
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^20.17.50",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  },
   "scripts": {
-    "download": "node download-all.js",
-    "download-tweets": "node tweet-downloader/download-tweets.js",
-    "download-images": "node image-downloader/download-images.js",
-    "retry-failed": "node retry-failed-tweets.js",
-    "update-state": "node update-state.js"
+    "build": "tsc",
+    "download": "ts-node download-all.ts",
+    "download-tweets": "ts-node tweet-downloader/download-tweets.ts",
+    "download-images": "ts-node image-downloader/download-images.ts",
+    "retry-failed": "ts-node retry-failed-tweets.ts",
+    "update-state": "ts-node update-state.ts",
+    "dev": "ts-node"
   }
 }
