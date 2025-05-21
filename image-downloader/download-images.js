@@ -1,6 +1,7 @@
 const fs = require('fs-extra');
 const path = require('path');
 require('dotenv').config();
+const { findUndownloadedMedia } = require('../tweet-downloader/download-tweets');
 
 // 設定ファイルのパス
 const CONFIG_FILE_PATH = path.join(__dirname, '..', 'config.json');
@@ -31,7 +32,7 @@ const STATUS = {
   NO_MEDIA: 'no_media'
 };
 
-// 設定ファイルから設定を読み込む
+// 設定ファイルから設定を読み込む関数
 function loadConfig() {
   try {
     if (fs.existsSync(CONFIG_FILE_PATH)) {
@@ -56,6 +57,11 @@ function loadConfig() {
     console.error(`設定ファイルの読み込みに失敗しました: ${error.message}`);
   }
   return false;
+}
+
+// Twitter Cookieの確認
+if (!CONFIG.twitterCookie) {
+  console.warn('警告: Twitter Cookieが設定されていません。一部のツイートがダウンロードできない可能性があります');
 }
 
 // ログ関数
@@ -185,7 +191,7 @@ async function main() {
     }
 
     // 出力ディレクトリの作成
-    await fs.ensureDir(CONFIG.outputDir);
+    await fs.mkdirp(CONFIG.outputDir);
 
     // 未ダウンロードのメディアを検出
     log('未ダウンロードのメディアを検出中...');
@@ -232,3 +238,10 @@ main().catch(error => {
   log(`致命的なエラーが発生しました: ${error.stack || error.message}`);
   process.exit(1);
 });
+
+// エクスポート
+module.exports = {
+  loadConfig,
+  CONFIG,
+  STATUS
+};

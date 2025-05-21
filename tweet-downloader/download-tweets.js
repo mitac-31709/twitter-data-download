@@ -38,43 +38,60 @@ let downloadStartTime = null;
 async function getTweetStatus(tweetId) {
     const tweetDir = path.join(DOWNLOADS_DIR, tweetId);
     const tweetFile = path.join(tweetDir, `${tweetId}.json`);
+    const statusFile = path.join(tweetDir, `${tweetId}.status.json`);
 
-    // ディレクトリが存在しない場合
-    if (!fs.existsSync(tweetDir)) {
-        return { status: STATUS.PENDING, metadata: { reason: 'ディレクトリが存在しません' } };
+    // ツイートディレクトリが存在しない場合
+    if (!await fs.pathExists(tweetDir)) {
+        return { status: STATUS.PENDING, details: { hasMetadata: false, downloadedMedia: 0 } };
     }
 
-    // JSONファイルが存在しない場合
-    if (!fs.existsSync(tweetFile)) {
-        return { status: STATUS.PENDING, metadata: { reason: 'JSONファイルが存在しません' } };
+    // ステータスファイルが存在する場合
+    if (await fs.pathExists(statusFile)) {
+        const statusData = await fs.readJSON(statusFile);
+        return statusData;
     }
 
-    try {
-        const data = JSON.parse(fs.readFileSync(tweetFile, 'utf8'));
-        const files = fs.readdirSync(tweetDir).filter(file => 
+    // メタデータファイルが存在する場合
+    if (await fs.pathExists(tweetFile)) {
+        const metadata = await fs.readJSON(tweetFile);
+        const mediaFiles = (await fs.readdir(tweetDir)).filter(file => 
             file !== `${tweetId}.json` && 
-            !file.endsWith('.txt')
+            !file.endsWith('.txt') &&
+            !file.endsWith('.status.json')
         );
 
-        // メディアの有無を確認
-        if (!data.media || !Array.isArray(data.media) || data.media.length === 0) {
-            return { status: STATUS.NO_MEDIA, metadata: { reason: 'メディアが含まれていません' } };
+        const hasMedia = metadata?.media && metadata.media.length > 0;
+        let status;
+
+        if (hasMedia) {
+            if (mediaFiles.length === metadata.media.length) {
+                status = STATUS.SUCCESS;
+            } else if (mediaFiles.length > 0) {
+                status = STATUS.PARTIAL;
+            } else {
+                status = STATUS.FAILED;
+            }
+        } else {
+            status = STATUS.NO_MEDIA;
         }
 
-        // メディアファイルの存在を確認
-        const mediaCount = data.media.length;
-        const downloadedCount = files.length;
+        const statusData = {
+            status,
+            details: {
+                hasMetadata: true,
+                hasMedia,
+                downloadedMedia: mediaFiles.length,
+                expectedMedia: metadata?.media?.length || 0
+            }
+        };
 
-        if (downloadedCount === 0) {
-            return { status: STATUS.PENDING, metadata: { reason: 'メディアファイルがダウンロードされていません' } };
-        } else if (downloadedCount < mediaCount) {
-            return { status: STATUS.PARTIAL, metadata: { reason: '一部のメディアファイルがダウンロードされていません' } };
-        }
-
-        return { status: STATUS.SUCCESS, metadata: { mediaCount, downloadedCount } };
-    } catch (error) {
-        return { status: STATUS.FAILED, metadata: { error: error.message } };
+        // ステータスファイルを保存
+        await fs.writeJSON(statusFile, statusData, { spaces: 2 });
+        return statusData;
     }
+
+    // メタデータもステータスも存在しない場合
+    return { status: STATUS.PENDING, details: { hasMetadata: false, downloadedMedia: 0 } };
 }
 
 // 統計情報を取得
@@ -324,33 +341,24 @@ function displayStatistics(tweetIds, skippedDownloaded, skippedError, downloaded
 }
 
 // ツイートの状態を更新する関数
-async function updateTweetStatus(tweetId, status, metadata = {}) {
+async function updateTweetStatus(tweetId, status, details) {
     const tweetDir = path.join(DOWNLOADS_DIR, tweetId);
-    const tweetFile = path.join(tweetDir, `${tweetId}.json`);
+    const statusFile = path.join(tweetDir, `${tweetId}.status.json`);
 
-    try {
-        // ディレクトリが存在しない場合は作成
-        await fs.ensureDir(tweetDir);
-
-        // JSONファイルが存在する場合は読み込み、存在しない場合は新規作成
-        let data = {};
-        if (await fs.pathExists(tweetFile)) {
-            data = await fs.readJSON(tweetFile);
-        }
-
-        // 状態情報を更新
-        data.status = status;
-        data.statusUpdatedAt = new Date().toISOString();
-        data.statusMetadata = {
-            ...(data.statusMetadata || {}),
-            ...metadata
-        };
-
-        // ファイルに保存
-        await fs.writeJSON(tweetFile, data, { spaces: 2 });
-    } catch (error) {
-        console.error(`ツイートの状態更新に失敗しました: ${tweetId} - ${error.message}`);
+    // ツイートディレクトリが存在しない場合は作成
+    if (!await fs.pathExists(tweetDir)) {
+        await fs.mkdirp(tweetDir);
     }
+
+    const statusData = {
+        status,
+        details: {
+            ...details,
+            updatedAt: new Date().toISOString()
+        }
+    };
+
+    await fs.writeJSON(statusFile, statusData, { spaces: 2 });
 }
 
 // メインのダウンロード処理関数
@@ -411,16 +419,20 @@ async function downloadTweets() {
             continue;
         }
 
-        // メタデータとダウンロード済みメディアの状態を初期化
+        let metadata = null;
         let hasMetadata = false;
         let downloadedMedia = 0;
-        let metadata = null;
 
         try {
             // メタデータの状態を確認
             hasMetadata = await fs.pathExists(tweetFile);
             if (hasMetadata) {
                 metadata = await fs.readJSON(tweetFile);
+            }
+
+            // ツイートディレクトリが存在しない場合は作成
+            if (!await fs.pathExists(tweetDir)) {
+                await fs.mkdirp(tweetDir);
             }
 
             const result = await TwitterDL.download(tweetId, {
@@ -431,7 +443,8 @@ async function downloadTweets() {
             // ダウンロード済みメディアの数を更新
             downloadedMedia = (await fs.readdir(tweetDir)).filter(file => 
                 file !== `${tweetId}.json` && 
-                !file.endsWith('.txt')
+                !file.endsWith('.txt') &&
+                !file.endsWith('.status.json')
             ).length;
 
             const hasMedia = metadata?.media && metadata.media.length > 0;
@@ -547,9 +560,52 @@ async function downloadTweets() {
     saveRateLimitState();
 }
 
+// 未ダウンロードのメディアを検出する関数
+async function findUndownloadedMedia() {
+    const undownloadedMedia = [];
+    const dirs = await fs.readdir(DOWNLOADS_DIR);
+
+    for (const tweetId of dirs) {
+        const tweetDir = path.join(DOWNLOADS_DIR, tweetId);
+        if (!(await fs.stat(tweetDir)).isDirectory()) continue;
+
+        const tweetFile = path.join(tweetDir, `${tweetId}.json`);
+        if (!await fs.pathExists(tweetFile)) continue;
+
+        const metadata = await fs.readJSON(tweetFile);
+        if (!metadata?.media || metadata.media.length === 0) continue;
+
+        const mediaFiles = (await fs.readdir(tweetDir)).filter(file => 
+            file !== `${tweetId}.json` && 
+            !file.endsWith('.txt') &&
+            !file.endsWith('.status.json')
+        );
+
+        if (mediaFiles.length < metadata.media.length) {
+            undownloadedMedia.push({
+                tweetId,
+                metadata,
+                downloadedCount: mediaFiles.length,
+                expectedCount: metadata.media.length,
+                tweetDir
+            });
+        }
+    }
+
+    return undownloadedMedia;
+}
+
 // スクリプト実行
 downloadTweets().catch(err => {
     console.error("予期しないエラーが発生しました:", err);
     // 予期せぬエラー発生時も状態を保存しておく
     saveRateLimitState();
 });
+
+// エクスポート
+module.exports = {
+    getTweetStatus,
+    updateTweetStatus,
+    findUndownloadedMedia,
+    STATUS
+};

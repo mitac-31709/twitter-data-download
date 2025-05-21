@@ -1,6 +1,7 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const { CONFIG: SHARED_CONFIG, getStats } = require('./shared/shared-state');
+const { findUndownloadedMedia } = require('./tweet-downloader/download-tweets');
 
 // ログ関数
 function log(message) {
@@ -52,7 +53,28 @@ async function main() {
 
         // 2. メディアファイルをダウンロード
         log('\nステップ2: メディアファイルをダウンロード中...');
-        await runScript(path.join(__dirname, 'image-downloader', 'download-images.js'));
+        
+        // 設定ファイルの確認
+        const configLoaded = require('./image-downloader/download-images').loadConfig();
+        if (!configLoaded) {
+            log('設定ファイルが見つからないため、デフォルト設定で実行します');
+        }
+
+        // Twitter Cookieの確認
+        if (!process.env.TWITTER_COOKIE) {
+            log('警告: Twitter Cookieが設定されていません。一部のツイートがダウンロードできない可能性があります');
+        }
+
+        // 未ダウンロードのメディアを検出
+        log('未ダウンロードのメディアを検出中...');
+        const undownloadedMedia = await findUndownloadedMedia();
+        log(`未ダウンロードのメディア: ${undownloadedMedia.length}件`);
+
+        if (undownloadedMedia.length > 0) {
+            await runScript(path.join(__dirname, 'image-downloader', 'download-images.js'));
+        } else {
+            log('未ダウンロードのメディアはありません。');
+        }
 
         // 最終的な統計情報を表示
         const finalStats = await getStats();
