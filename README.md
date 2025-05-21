@@ -178,3 +178,73 @@ MIT
 3. 変更のコミット
 4. ブランチのプッシュ
 5. プルリクエストの作成
+
+## ファイル構造
+
+```
+twitter-data-download/
+├── src/                      # メインのソースコード
+│   ├── core/                 # コアユーティリティ
+│   │   ├── types/           # 型定義
+│   │   └── utils/           # ユーティリティ関数
+│   └── tweet-downloader/     # ツイートダウンロード関連のコード
+├── tweet-downloader/         # ツイートダウンロードの実装
+│   ├── tweet-downloader.ts   # メインのダウンロードロジック
+│   ├── tweet-status-manager.ts
+│   ├── rate-limit-manager.ts
+│   ├── stats-manager.ts
+│   └── progress-manager.ts
+├── image-downloader/         # 画像ダウンロードの実装
+├── shared/                   # 共有ユーティリティと型定義
+├── config/                   # 設定ファイル
+│   └── config.json          # デフォルト設定
+├── scripts/                  # ビルドスクリプトとユーティリティ
+├── data/                     # データファイルの保存先
+│   └── processed-tweets.json # 処理済みツイートの状態
+├── downloads/                # ダウンロードしたファイルの保存先
+│   └── download.log         # ダウンロードログ
+├── .vscode/                  # VSCode設定
+├── package.json             # プロジェクト設定と依存関係
+├── tsconfig.json            # TypeScript設定
+├── .gitignore               # Git除外設定
+└── README.md                # プロジェクトドキュメント
+```
+
+### ディレクトリの説明
+
+#### ソースコード関連
+- `src/`: メインのソースコードディレクトリ
+  - `core/`: コアユーティリティと共通機能
+  - `tweet-downloader/`: ツイートダウンロードの実装
+
+#### 機能モジュール
+- `tweet-downloader/`: ツイートダウンロードの中核機能
+  - 各マネージャークラスの実装
+  - ダウンロードロジック
+- `image-downloader/`: メディアファイルのダウンロード処理
+- `shared/`: 共通のユーティリティと型定義
+
+#### 設定とデータ
+- `config/`: 設定ファイル
+  - デフォルト設定
+  - 環境固有の設定
+- `data/`: データファイル
+  - 処理済みツイートの状態
+  - 統計情報
+- `downloads/`: ダウンロードしたファイル
+  - メディアファイル
+  - ログファイル
+
+#### 開発環境
+- `scripts/`: 開発用スクリプト
+  - ビルドスクリプト
+  - テストスクリプト
+- `.vscode/`: VSCode設定
+  - デバッグ設定
+  - 推奨拡張機能
+
+#### 設定ファイル
+- `package.json`: npm依存関係とスクリプト
+- `tsconfig.json`: TypeScriptコンパイラ設定
+- `.gitignore`: バージョン管理から除外するファイル
+- `.cursorignore`: Cursor IDEの設定

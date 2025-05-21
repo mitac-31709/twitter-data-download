@@ -48,4 +48,5 @@ export interface TwitterDLResult {
         url: string;
         type: string;
     }>;
+    tweetId?: string;
 } 

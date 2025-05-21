@@ -1,14 +1,39 @@
-const fs = require('fs-extra');
-const path = require('path');
-require('dotenv').config();
-const { findUndownloadedMedia } = require('../tweet-downloader/download-tweets');
+import fs from 'fs-extra';
+import path from 'path';
+import dotenv from 'dotenv';
+import { findUndownloadedMedia, type MediaInfo as TweetMediaInfo } from '../tweet-downloader/download-tweets';
+
+dotenv.config();
 
 // 設定ファイルのパス
 const CONFIG_FILE_PATH = path.join(__dirname, '..', 'config.json');
 const DOWNLOADS_DIR = path.join(__dirname, '..', 'downloads');
 
+interface Config {
+  outputDir: string;
+  logFile: string;
+  batchSize: number;
+  batchDelay: number;
+  rateLimitWaitTime: number;
+  maxRateLimitRetries: number;
+  twitterCookie: string;
+}
+
+// MediaInfoの型をTweetMediaInfoから継承
+type MediaInfo = TweetMediaInfo;
+
+interface TweetStatus {
+  status: string;
+  metadata: {
+    reason?: string;
+    error?: string;
+    mediaCount?: number;
+    downloadedCount?: number;
+  };
+}
+
 // 設定
-let CONFIG = {
+let CONFIG: Config = {
   outputDir: DOWNLOADS_DIR,
   logFile: path.join(__dirname, 'download-log.txt'),
   // 一度に処理するツイート数の制限（レート制限対策）
@@ -33,10 +58,10 @@ const STATUS = {
 };
 
 // 設定ファイルから設定を読み込む関数
-function loadConfig() {
+async function loadConfig(): Promise<boolean> {
   try {
-    if (fs.existsSync(CONFIG_FILE_PATH)) {
-      const configData = fs.readJSONSync(CONFIG_FILE_PATH);
+    if (await fs.pathExists(CONFIG_FILE_PATH)) {
+      const configData = await fs.readJSON(CONFIG_FILE_PATH);
       
       // ダウンロード設定を適用
       if (configData.downloadSettings) {
@@ -53,8 +78,9 @@ function loadConfig() {
       
       return true;
     }
-  } catch (error) {
-    console.error(`設定ファイルの読み込みに失敗しました: ${error.message}`);
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    console.error(`設定ファイルの読み込みに失敗しました: ${errorMessage}`);
   }
   return false;
 }
@@ -65,22 +91,22 @@ if (!CONFIG.twitterCookie) {
 }
 
 // ログ関数
-function log(message) {
+function log(message: string): void {
   const timestamp = new Date().toISOString();
   const logMessage = `[${timestamp}] ${message}\n`;
   console.log(message);
-  fs.appendFileSync(CONFIG.logFile, logMessage);
+  fs.appendFile(CONFIG.logFile, logMessage).catch(console.error);
 }
 
 // URLからファイル名を抽出
-function extractFilenameFromUrl(url) {
+function extractFilenameFromUrl(url: string): string {
   const urlObj = new URL(url);
   const pathParts = urlObj.pathname.split('/');
   return pathParts[pathParts.length - 1];
 }
 
 // ツイートの状態を取得
-async function getTweetStatus(tweetId) {
+async function getTweetStatus(tweetId: string): Promise<TweetStatus> {
   const tweetDir = path.join(CONFIG.outputDir, tweetId);
   const tweetFile = path.join(tweetDir, `${tweetId}.json`);
 
@@ -118,13 +144,14 @@ async function getTweetStatus(tweetId) {
     }
 
     return { status: STATUS.SUCCESS, metadata: { mediaCount, downloadedCount } };
-  } catch (error) {
-    return { status: STATUS.FAILED, metadata: { error: error.message } };
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return { status: STATUS.FAILED, metadata: { error: errorMessage } };
   }
 }
 
 // ファイルをダウンロードする関数
-async function downloadFile(url, outputPath) {
+async function downloadFile(url: string, outputPath: string): Promise<void> {
   try {
     const response = await fetch(url, {
       headers: {
@@ -136,28 +163,31 @@ async function downloadFile(url, outputPath) {
       throw new Error(`Failed to download file: ${response.status} ${response.statusText}`);
     }
 
-    // arrayBufferを使用してデータを取得
     const arrayBuffer = await response.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
     await fs.writeFile(outputPath, buffer);
-  } catch (error) {
-    if (error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT') {
-      // ネットワークエラーの場合は少し待って再試行
-      await new Promise(resolve => setTimeout(resolve, 5000));
-      return downloadFile(url, outputPath);
+  } catch (error: unknown) {
+    if (error instanceof Error && ('code' in error)) {
+      const err = error as { code?: string };
+      if (err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT') {
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        return downloadFile(url, outputPath);
+      }
     }
     throw error;
   }
 }
 
 // メディアのダウンロード
-async function downloadMedia(mediaInfo) {
+async function downloadMedia(mediaInfo: MediaInfo): Promise<boolean> {
   try {
     const url = mediaInfo.media.type === 'image' ? mediaInfo.media.image : mediaInfo.videoUrl;
+    if (!url) {
+      throw new Error('URL is undefined');
+    }
     await downloadFile(url, mediaInfo.filePath);
     log(`メディアファイルをダウンロードしました: ${mediaInfo.tweetId} - ${path.basename(mediaInfo.filePath)}`);
     
-    // ツイートの状態を更新
     const tweetStatus = await getTweetStatus(mediaInfo.tweetId);
     if (tweetStatus.status === STATUS.SUCCESS) {
       log(`ツイート ${mediaInfo.tweetId} のすべてのメディアがダウンロードされました`);
@@ -166,8 +196,9 @@ async function downloadMedia(mediaInfo) {
     }
     
     return true;
-  } catch (error) {
-    log(`メディアファイルのダウンロードに失敗しました: ${mediaInfo.tweetId} - ${error.message}`);
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    log(`メディアファイルのダウンロードに失敗しました: ${mediaInfo.tweetId} - ${errorMessage}`);
     return false;
   }
 }
@@ -176,7 +207,7 @@ async function downloadMedia(mediaInfo) {
 async function main() {
   try {
     // 設定ファイルの読み込み
-    const configLoaded = loadConfig();
+    const configLoaded = await loadConfig();
     if (configLoaded) {
       log('設定ファイルから設定を読み込みました');
     } else {
@@ -191,7 +222,7 @@ async function main() {
     }
 
     // 出力ディレクトリの作成
-    await fs.mkdirp(CONFIG.outputDir);
+    await fs.ensureDir(CONFIG.outputDir);
 
     // 未ダウンロードのメディアを検出
     log('未ダウンロードのメディアを検出中...');
@@ -227,8 +258,9 @@ async function main() {
     
     log('処理完了');
     
-  } catch (error) {
-    log(`予期せぬエラーが発生しました: ${error.message}`);
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    log(`予期せぬエラーが発生しました: ${errorMessage}`);
     process.exit(1);
   }
 }
@@ -240,8 +272,11 @@ main().catch(error => {
 });
 
 // エクスポート
-module.exports = {
+export {
   loadConfig,
   CONFIG,
-  STATUS
+  STATUS,
+  type Config,
+  type MediaInfo,
+  type TweetStatus
 };

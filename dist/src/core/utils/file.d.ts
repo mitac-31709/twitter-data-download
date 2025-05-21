@@ -1,0 +1,12 @@
+export declare function ensureDirectoryExists(dirPath: string): Promise<void>;
+export declare function readJsonFile<T>(filePath: string): Promise<T>;
+export declare function writeJsonFile<T>(filePath: string, data: T): Promise<void>;
+export declare function fileExists(filePath: string): Promise<boolean>;
+export declare function directoryExists(dirPath: string): Promise<boolean>;
+export declare function listFiles(dirPath: string, filter?: (file: string) => boolean): Promise<string[]>;
+export declare function copyFile(src: string, dest: string): Promise<void>;
+export declare function moveFile(src: string, dest: string): Promise<void>;
+export declare function deleteFile(filePath: string): Promise<void>;
+export declare function getFileExtension(filePath: string): string;
+export declare function getFileNameWithoutExtension(filePath: string): string;
+export declare function createDirectoryIfNotExists(dirPath: string): Promise<void>;
