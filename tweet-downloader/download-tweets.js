@@ -411,20 +411,30 @@ async function downloadTweets() {
             continue;
         }
 
+        // メタデータとダウンロード済みメディアの状態を初期化
+        let hasMetadata = false;
+        let downloadedMedia = 0;
+        let metadata = null;
+
         try {
+            // メタデータの状態を確認
+            hasMetadata = await fs.pathExists(tweetFile);
+            if (hasMetadata) {
+                metadata = await fs.readJSON(tweetFile);
+            }
+
             const result = await TwitterDL.download(tweetId, {
                 cookie: TWITTER_COOKIE,
                 output: tweetDir
             });
 
-            // メタデータの取得状態を確認
-            const hasMetadata = await fs.pathExists(tweetFile);
-            const metadata = hasMetadata ? await fs.readJSON(tweetFile) : null;
-            const hasMedia = metadata?.media && metadata.media.length > 0;
-            const downloadedMedia = (await fs.readdir(tweetDir)).filter(file => 
+            // ダウンロード済みメディアの数を更新
+            downloadedMedia = (await fs.readdir(tweetDir)).filter(file => 
                 file !== `${tweetId}.json` && 
                 !file.endsWith('.txt')
             ).length;
+
+            const hasMedia = metadata?.media && metadata.media.length > 0;
 
             let status;
             if (result.status === 'error') {
@@ -475,20 +485,6 @@ async function downloadTweets() {
                 saveRateLimitState();
             }
 
-            // 固定待機時間
-            if (FIXED_WAIT_TIME_MS > 0) {
-                await sleep(FIXED_WAIT_TIME_MS);
-            }
-
-            // プログレスバー更新（ダウンロード・スキップ・レートを更新）
-            progressBar.update(i + 1, { 
-                currentTweet: tweetId, 
-                download: downloadedCount, 
-                skipped: skippedDownloaded, 
-                skippedError, 
-                rate: (i + 1) / ((Date.now() - downloadStartTime) / 60000) 
-            });
-
         } catch (error) {
             const { isRateLimit, reason } = checkRateLimit(null, error);
             let status;
@@ -504,12 +500,6 @@ async function downloadTweets() {
                 saveRateLimitState();
             } else {
                 // エラーでも一部のメディアがダウンロードされている可能性がある
-                const hasMetadata = await fs.pathExists(tweetFile);
-                const downloadedMedia = (await fs.readdir(tweetDir)).filter(file => 
-                    file !== `${tweetId}.json` && 
-                    !file.endsWith('.txt')
-                ).length;
-
                 if (hasMetadata && downloadedMedia > 0) {
                     status = STATUS.PARTIAL;
                 } else {
@@ -521,17 +511,23 @@ async function downloadTweets() {
 
             await updateTweetStatus(tweetId, status, {
                 error: error.message,
-                hasMetadata: hasMetadata,
-                downloadedMedia: downloadedMedia
-            });
-            progressBar.update(i + 1, { 
-                currentTweet: tweetId, 
-                download: downloadedCount, 
-                skipped: skippedDownloaded, 
-                skippedError, 
-                rate: (i + 1) / ((Date.now() - downloadStartTime) / 60000) 
+                hasMetadata,
+                downloadedMedia
             });
         }
+
+        // 固定待機時間
+        if (FIXED_WAIT_TIME_MS > 0) {
+            await sleep(FIXED_WAIT_TIME_MS);
+        }
+
+        // プログレスバー更新
+        progressBar.update(i + 1, { 
+            currentTweet: tweetId, 
+            download: downloadedCount, 
+            skipped: (skippedDownloaded + skippedError), 
+            rate: (i + 1) / ((Date.now() - downloadStartTime) / 60000) 
+        });
     }
     progressBar.stop();
 
