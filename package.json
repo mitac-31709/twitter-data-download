@@ -1,4 +1,8 @@
 {
+  "name": "twitter-data-download",
+  "version": "1.0.0",
+  "description": "Twitterのデータをダウンロードするツール",
+  "main": "dist/scripts/download-all.js",
   "dependencies": {
     "cli-progress": "^3.12.0",
     "dotenv": "^16.5.0",
@@ -11,17 +15,19 @@
   "devDependencies": {
     "@types/cli-progress": "^3.11.5",
     "@types/fs-extra": "^11.0.4",
+    "@types/jest": "^29.5.12",
     "@types/node": "^20.17.50",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.2",
     "ts-node": "^10.9.2",
     "typescript": "^5.3.3"
   },
   "scripts": {
     "build": "tsc",
-    "download": "ts-node download-all.ts",
-    "download-tweets": "ts-node tweet-downloader/download-tweets.ts",
-    "download-images": "ts-node image-downloader/download-images.ts",
-    "retry-failed": "ts-node retry-failed-tweets.ts",
-    "update-state": "ts-node update-state.ts",
-    "dev": "ts-node"
+    "start": "node dist/scripts/download-all.js",
+    "dev": "ts-node scripts/download-all.ts",
+    "clean": "rimraf dist",
+    "lint": "eslint . --ext .ts",
+    "test": "jest"
   }
 }

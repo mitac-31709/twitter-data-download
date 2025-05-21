@@ -1,0 +1,11 @@
+{
+    "downloadSettings": {
+        "batchSize": 50,
+        "batchDelay": 5000,
+        "rateLimitWaitTime": 900000,
+        "maxRateLimitRetries": 3
+    },
+    "twitterCookie": "",
+    "outputDir": "downloads",
+    "logFile": "download-log.txt"
+} 

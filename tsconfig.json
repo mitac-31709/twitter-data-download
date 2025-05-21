@@ -4,7 +4,7 @@
     "module": "commonjs",
     "lib": ["ES2020", "DOM"],
     "outDir": "./dist",
-    "rootDir": "./",
+    "rootDir": ".",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -13,17 +13,25 @@
     "moduleResolution": "node",
     "sourceMap": true,
     "declaration": true,
-    "types": ["node"]
+    "types": ["node", "jest"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@core/*": ["src/core/*"],
+      "@utils/*": ["src/core/utils/*"],
+      "@types/*": ["src/core/types/*"],
+      "@services/*": ["src/core/services/*"],
+      "@state/*": ["src/state/*"]
+    }
   },
   "include": [
-    "*.ts",
-    "tweet-downloader/**/*.ts",
-    "image-downloader/**/*.ts",
-    "shared/**/*.ts"
+    "src/**/*.ts",
+    "scripts/**/*.ts"
   ],
   "exclude": [
     "node_modules",
     "dist",
-    "downloads"
+    "downloads",
+    "data"
   ]
 } 
