@@ -1,4 +1,4 @@
-const fs = require('fs');
+const fs = require('fs-extra');
 const path = require('path');
 const readline = require('readline');
 const { TwitterDL } = require('twitter-downloader');
@@ -323,6 +323,36 @@ function displayStatistics(tweetIds, skippedDownloaded, skippedError, downloaded
     console.log("===================");
 }
 
+// ツイートの状態を更新する関数
+async function updateTweetStatus(tweetId, status, metadata = {}) {
+    const tweetDir = path.join(DOWNLOADS_DIR, tweetId);
+    const tweetFile = path.join(tweetDir, `${tweetId}.json`);
+
+    try {
+        // ディレクトリが存在しない場合は作成
+        await fs.ensureDir(tweetDir);
+
+        // JSONファイルが存在する場合は読み込み、存在しない場合は新規作成
+        let data = {};
+        if (await fs.pathExists(tweetFile)) {
+            data = await fs.readJSON(tweetFile);
+        }
+
+        // 状態情報を更新
+        data.status = status;
+        data.statusUpdatedAt = new Date().toISOString();
+        data.statusMetadata = {
+            ...(data.statusMetadata || {}),
+            ...metadata
+        };
+
+        // ファイルに保存
+        await fs.writeJSON(tweetFile, data, { spaces: 2 });
+    } catch (error) {
+        console.error(`ツイートの状態更新に失敗しました: ${tweetId} - ${error.message}`);
+    }
+}
+
 // メインのダウンロード処理関数
 async function downloadTweets() {
     if (!TWITTER_COOKIE) {
@@ -388,10 +418,10 @@ async function downloadTweets() {
             });
 
             // メタデータの取得状態を確認
-            const hasMetadata = fs.existsSync(tweetFile);
-            const metadata = hasMetadata ? JSON.parse(fs.readFileSync(tweetFile, 'utf8')) : null;
+            const hasMetadata = await fs.pathExists(tweetFile);
+            const metadata = hasMetadata ? await fs.readJSON(tweetFile) : null;
             const hasMedia = metadata?.media && metadata.media.length > 0;
-            const downloadedMedia = fs.readdirSync(tweetDir).filter(file => 
+            const downloadedMedia = (await fs.readdir(tweetDir)).filter(file => 
                 file !== `${tweetId}.json` && 
                 !file.endsWith('.txt')
             ).length;
@@ -474,8 +504,8 @@ async function downloadTweets() {
                 saveRateLimitState();
             } else {
                 // エラーでも一部のメディアがダウンロードされている可能性がある
-                const hasMetadata = fs.existsSync(tweetFile);
-                const downloadedMedia = fs.readdirSync(tweetDir).filter(file => 
+                const hasMetadata = await fs.pathExists(tweetFile);
+                const downloadedMedia = (await fs.readdir(tweetDir)).filter(file => 
                     file !== `${tweetId}.json` && 
                     !file.endsWith('.txt')
                 ).length;
@@ -491,12 +521,8 @@ async function downloadTweets() {
 
             await updateTweetStatus(tweetId, status, {
                 error: error.message,
-                hasMetadata: fs.existsSync(tweetFile),
-                downloadedMedia: fs.existsSync(tweetDir) ? 
-                    fs.readdirSync(tweetDir).filter(file => 
-                        file !== `${tweetId}.json` && 
-                        !file.endsWith('.txt')
-                    ).length : 0
+                hasMetadata: hasMetadata,
+                downloadedMedia: downloadedMedia
             });
             progressBar.update(i + 1, { 
                 currentTweet: tweetId, 
