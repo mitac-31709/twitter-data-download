@@ -1,8 +1,18 @@
 const fs = require('fs-extra');
 const path = require('path');
-const { CONFIG: SHARED_CONFIG, updateTweetStatus, getStats, getTweetStatus } = require('./shared/shared-state');
 const cliProgress = require('cli-progress');
 const { default: ora } = require('ora');
+
+// ツイートの状態定数
+const STATUS = {
+    PENDING: 'pending',
+    SUCCESS: 'success',
+    PARTIAL: 'partial',
+    FAILED: 'failed',
+    NO_MEDIA: 'no_media'
+};
+
+const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
 
 // コマンドライン引数の解析
 function parseArgs() {
@@ -50,6 +60,18 @@ function log(message) {
     console.log(message);
 }
 
+// URLからファイル名を抽出
+function extractFilenameFromUrl(url) {
+    try {
+        const urlObj = new URL(url);
+        const pathParts = urlObj.pathname.split('/');
+        return pathParts[pathParts.length - 1];
+    } catch (error) {
+        log(`URLからのファイル名抽出に失敗しました: ${url} - ${error.message}`);
+        return null;
+    }
+}
+
 // メディアファイルの情報を取得
 function getMediaInfoFromJson(tweetFile) {
     try {
@@ -89,31 +111,39 @@ function getMediaInfoFromJson(tweetFile) {
                 if (!media.image) {
                     continue; // 画像URLが存在しない場合はスキップ
                 }
-                const imageUrl = media.image;
-                const fileName = path.basename(imageUrl.split('?')[0]); // URLからファイル名を抽出
-                mediaDetail.expectedFiles.push(fileName);
+                const filename = extractFilenameFromUrl(media.image);
+                if (filename) {
+                    mediaDetail.expectedFiles.push(filename);
+                }
             } else if (media.type === 'video') {
                 // 動画の場合
-                if (!media.cover) {
-                    continue; // カバー画像が存在しない場合はスキップ
+                if (!media.videos || !Array.isArray(media.videos) || media.videos.length === 0) {
+                    continue; // 動画情報が存在しない場合はスキップ
                 }
-                const coverUrl = media.cover;
-                const coverFileName = path.basename(coverUrl.split('?')[0]);
-                mediaDetail.expectedFiles.push(coverFileName);
 
                 // 最高品質の動画を選択
-                if (media.videos && media.videos.length > 0) {
-                    const highestQuality = media.videos.reduce((prev, current) => {
-                        return (prev.bitrate > current.bitrate) ? prev : current;
-                    });
-                    const videoFileName = path.basename(highestQuality.url.split('?')[0]);
-                    mediaDetail.expectedFiles.push(videoFileName);
-                } else {
-                    continue; // 動画URLが存在しない場合はスキップ
+                const highestQuality = media.videos.reduce((prev, current) => {
+                    return (prev.bitrate > current.bitrate) ? prev : current;
+                });
+                
+                const filename = extractFilenameFromUrl(highestQuality.url);
+                if (filename) {
+                    mediaDetail.expectedFiles.push(filename);
+                }
+
+                // カバー画像がある場合は追加
+                if (media.cover) {
+                    const coverFilename = extractFilenameFromUrl(media.cover);
+                    if (coverFilename) {
+                        mediaDetail.expectedFiles.push(coverFilename);
+                    }
                 }
             }
 
-            mediaInfo.mediaDetails.push(mediaDetail);
+            // 期待されるファイルが1つでもある場合のみ追加
+            if (mediaDetail.expectedFiles.length > 0) {
+                mediaInfo.mediaDetails.push(mediaDetail);
+            }
         }
 
         // 有効なメディアが1つも存在しない場合
@@ -148,9 +178,15 @@ function checkMediaFiles(dirPath, mediaInfo) {
 
         // 各メディアのファイルをチェック
         for (const mediaDetail of mediaInfo.mediaDetails) {
-            const allFilesExist = mediaDetail.expectedFiles.every(expectedFile => 
-                files.some(file => file === expectedFile)
-            );
+            // すべての期待されるファイルが存在するかチェック
+            const allFilesExist = mediaDetail.expectedFiles.every(expectedFile => {
+                const exists = files.some(file => file === expectedFile);
+                if (!exists) {
+                    log(`ファイルが見つかりません: ${dirPath}/${expectedFile}`);
+                }
+                return exists;
+            });
+
             if (allFilesExist) {
                 mediaDetail.downloaded = true;
                 downloadedCount++;
@@ -164,30 +200,37 @@ function checkMediaFiles(dirPath, mediaInfo) {
             mediaDetails: mediaInfo.mediaDetails
         };
     } catch (error) {
-        return { hasMedia: false, mediaCount: 0, downloadedCount: 0, mediaDetails: [] };
+        log(`メディアファイルのチェック中にエラーが発生しました: ${error.message}`);
+        return { 
+            hasMedia: false, 
+            mediaCount: 0, 
+            downloadedCount: 0, 
+            mediaDetails: [],
+            error: error.message
+        };
     }
 }
 
 // ツイートの状態を判定
 async function determineTweetStatus(tweetId) {
-    const tweetDir = path.join(SHARED_CONFIG.downloadsDir, tweetId);
+    const tweetDir = path.join(DOWNLOADS_DIR, tweetId);
     const tweetFile = path.join(tweetDir, `${tweetId}.json`);
 
     // ディレクトリが存在しない場合
-    if (!fs.existsSync(tweetDir)) {
-        return { status: SHARED_CONFIG.STATUS.PENDING, metadata: { reason: 'ディレクトリが存在しません' } };
+    if (!await fs.pathExists(tweetDir)) {
+        return { status: STATUS.PENDING, metadata: { reason: 'ディレクトリが存在しません' } };
     }
 
     // ツイートのJSONファイルが存在しない場合
-    if (!fs.existsSync(tweetFile)) {
-        return { status: SHARED_CONFIG.STATUS.PENDING, metadata: { reason: 'JSONファイルが存在しません' } };
+    if (!await fs.pathExists(tweetFile)) {
+        return { status: STATUS.PENDING, metadata: { reason: 'JSONファイルが存在しません' } };
     }
 
     // メディア情報を取得
     const mediaInfo = getMediaInfoFromJson(tweetFile);
     if (!mediaInfo.hasMedia) {
         return { 
-            status: SHARED_CONFIG.STATUS.NO_MEDIA, 
+            status: STATUS.NO_MEDIA, 
             metadata: { 
                 reason: mediaInfo.reason || 'メディアが含まれていません',
                 mediaCount: 0,
@@ -202,7 +245,7 @@ async function determineTweetStatus(tweetId) {
     // メディアのダウンロード状態に基づいて状態を判定
     if (checkResult.downloadedCount === 0) {
         return { 
-            status: SHARED_CONFIG.STATUS.PENDING, 
+            status: STATUS.PENDING, 
             metadata: { 
                 reason: 'メディアファイルがダウンロードされていません',
                 mediaCount: checkResult.mediaCount,
@@ -211,7 +254,7 @@ async function determineTweetStatus(tweetId) {
         };
     } else if (checkResult.downloadedCount < checkResult.mediaCount) {
         return { 
-            status: SHARED_CONFIG.STATUS.PARTIAL, 
+            status: STATUS.PARTIAL, 
             metadata: { 
                 reason: '一部のメディアファイルがダウンロードされていません',
                 mediaCount: checkResult.mediaCount,
@@ -223,44 +266,13 @@ async function determineTweetStatus(tweetId) {
 
     // すべてのメディアがダウンロードされている場合
     return { 
-        status: SHARED_CONFIG.STATUS.SUCCESS, 
+        status: STATUS.SUCCESS, 
         metadata: { 
             mediaCount: checkResult.mediaCount,
             downloadedCount: checkResult.downloadedCount,
             mediaDetails: checkResult.mediaDetails
         } 
     };
-}
-
-// 状態更新のキュー
-class StatusUpdateQueue {
-    constructor() {
-        this.queue = [];
-        this.processing = false;
-    }
-
-    async add(tweetId, status, metadata) {
-        return new Promise((resolve, reject) => {
-            this.queue.push({ tweetId, status, metadata, resolve, reject });
-            this.process();
-        });
-    }
-
-    async process() {
-        if (this.processing || this.queue.length === 0) return;
-        
-        this.processing = true;
-        while (this.queue.length > 0) {
-            const { tweetId, status, metadata, resolve, reject } = this.queue.shift();
-            try {
-                await updateTweetStatus(tweetId, status, metadata);
-                resolve();
-            } catch (error) {
-                reject(error);
-            }
-        }
-        this.processing = false;
-    }
 }
 
 // メイン処理
@@ -273,46 +285,23 @@ async function main() {
     }
 
     const spinner = ora('状態の更新を準備中...').start();
-    const statusQueue = new StatusUpdateQueue();
     
     try {
         // downloadsディレクトリの存在確認
-        if (!fs.existsSync(SHARED_CONFIG.downloadsDir)) {
+        if (!await fs.pathExists(DOWNLOADS_DIR)) {
             spinner.fail('downloadsディレクトリが見つかりません。');
             return;
         }
 
         // ディレクトリ一覧を取得
-        let dirs = fs.readdirSync(SHARED_CONFIG.downloadsDir)
-            .filter(item => {
-                const fullPath = path.join(SHARED_CONFIG.downloadsDir, item);
-                return fs.statSync(fullPath).isDirectory();
+        let dirs = (await fs.readdir(DOWNLOADS_DIR))
+            .filter(async item => {
+                const fullPath = path.join(DOWNLOADS_DIR, item);
+                const stats = await fs.stat(fullPath);
+                return stats.isDirectory();
             });
 
-        // 新規ツイートのみを処理するモードの場合
-        if (options.newOnly) {
-            spinner.text = '新規ツイートを検索中...';
-            const existingTweets = new Set();
-            
-            // 既存のツイートIDを取得
-            const stats = await getStats();
-            if (stats.tweets) {
-                Object.keys(stats.tweets).forEach(id => existingTweets.add(id));
-            }
-
-            // 新規ツイートのみをフィルタリング
-            const originalCount = dirs.length;
-            dirs = dirs.filter(id => !existingTweets.has(id));
-            
-            spinner.succeed(`新規ツイートを検出: ${dirs.length}件（既存: ${originalCount - dirs.length}件）`);
-            
-            if (dirs.length === 0) {
-                spinner.succeed('処理対象の新規ツイートはありません。');
-                return;
-            }
-        } else {
-            spinner.succeed(`${dirs.length}件のツイートディレクトリを処理します...`);
-        }
+        spinner.succeed(`${dirs.length}件のツイートディレクトリを処理します...`);
 
         // プログレスバーの設定
         const progressBar = new cliProgress.SingleBar({
@@ -326,38 +315,45 @@ async function main() {
             currentTweet: '準備中...'
         });
 
-        // 並列処理のためのバッチサイズ
-        const BATCH_SIZE = 20;
-        let updatedCount = 0;
-        let pendingCount = 0;
-        let successCount = 0;
-        let noMediaCount = 0;
-        let partialCount = 0;
+        // 統計情報
+        let stats = {
+            total: dirs.length,
+            successful: 0,
+            partial: 0,
+            failed: 0,
+            noMedia: 0,
+            pending: 0,
+            error: 0
+        };
 
         // バッチ処理
+        const BATCH_SIZE = 20;
+        let updatedCount = 0;
+
         for (let i = 0; i < dirs.length; i += BATCH_SIZE) {
             const batch = dirs.slice(i, i + BATCH_SIZE);
             const batchPromises = batch.map(async (tweetId) => {
                 const result = await determineTweetStatus(tweetId);
-                await statusQueue.add(tweetId, result.status, {
-                    ...result.metadata,
-                    timestamp: new Date().toISOString(),
-                    updatedBy: 'update-state.js'
-                });
-
+                
+                // 状態に応じて統計を更新
                 switch (result.status) {
-                    case SHARED_CONFIG.STATUS.PENDING:
-                        pendingCount++;
+                    case STATUS.SUCCESS:
+                        stats.successful++;
                         break;
-                    case SHARED_CONFIG.STATUS.SUCCESS:
-                        successCount++;
+                    case STATUS.PARTIAL:
+                        stats.partial++;
                         break;
-                    case SHARED_CONFIG.STATUS.NO_MEDIA:
-                        noMediaCount++;
+                    case STATUS.FAILED:
+                        stats.failed++;
                         break;
-                    case SHARED_CONFIG.STATUS.PARTIAL:
-                        partialCount++;
+                    case STATUS.NO_MEDIA:
+                        stats.noMedia++;
                         break;
+                    case STATUS.PENDING:
+                        stats.pending++;
+                        break;
+                    default:
+                        stats.error++;
                 }
 
                 progressBar.update(++updatedCount, {
@@ -370,28 +366,17 @@ async function main() {
             await Promise.all(batchPromises);
         }
 
-        // キューに残っている更新を処理
-        while (statusQueue.queue.length > 0) {
-            await new Promise(resolve => setTimeout(resolve, 100));
-        }
-
         progressBar.stop();
 
         // 統計情報の表示
-        const stats = await getStats();
         console.log('\n=== 更新結果 ===');
         console.log(`処理したツイート数: ${updatedCount}件`);
-        console.log(`- 成功: ${successCount}件`);
-        console.log(`- 一部成功: ${partialCount}件`);
-        console.log(`- メディアなし: ${noMediaCount}件`);
-        console.log(`- 保留中: ${pendingCount}件`);
-        console.log('\n=== 全体の統計 ===');
         console.log(`- 成功: ${stats.successful}件`);
-        console.log(`- 一部成功: ${stats.partial || 0}件`);
-        console.log(`- 失敗: ${stats.failed}件`);
+        console.log(`- 一部成功: ${stats.partial}件`);
         console.log(`- メディアなし: ${stats.noMedia}件`);
-        console.log(`- エラー: ${stats.error}件`);
         console.log(`- 保留中: ${stats.pending}件`);
+        console.log(`- 失敗: ${stats.failed}件`);
+        console.log(`- エラー: ${stats.error}件`);
         console.log(`- 合計: ${stats.total}件`);
 
         spinner.succeed('状態の更新が完了しました。');

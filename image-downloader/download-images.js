@@ -1,18 +1,14 @@
 const fs = require('fs-extra');
-const { spawn } = require('child_process');
-const readline = require('readline');
 const path = require('path');
-const StreamValues = require('stream-json/streamers/StreamValues');
-const { CONFIG: SHARED_CONFIG, updateTweetStatus, getTweetStatus, getStats } = require(path.join(__dirname, '..', 'shared', 'shared-state'));
+require('dotenv').config();
 
 // 設定ファイルのパス
 const CONFIG_FILE_PATH = path.join(__dirname, '..', 'config.json');
+const DOWNLOADS_DIR = path.join(__dirname, '..', 'downloads');
 
 // 設定
 let CONFIG = {
-  likeJsPath: path.join(__dirname, '..', 'shared', 'like.js'),
-  processedTweetsFile: path.join(__dirname, '..', 'processed-tweets.json'),
-  outputDir: SHARED_CONFIG.downloadsDir,
+  outputDir: DOWNLOADS_DIR,
   logFile: path.join(__dirname, 'download-log.txt'),
   // 一度に処理するツイート数の制限（レート制限対策）
   batchSize: 50,
@@ -23,10 +19,16 @@ let CONFIG = {
   // レート制限時の最大再試行回数
   maxRateLimitRetries: 3,
   // Twitter認証情報
-  twitterCredentials: {
-    username: '',
-    password: ''
-  }
+  twitterCookie: process.env.TWITTER_COOKIE || ''
+};
+
+// ツイートの状態定数
+const STATUS = {
+  PENDING: 'pending',
+  SUCCESS: 'success',
+  PARTIAL: 'partial',
+  FAILED: 'failed',
+  NO_MEDIA: 'no_media'
 };
 
 // 設定ファイルから設定を読み込む
@@ -44,8 +46,8 @@ function loadConfig() {
       }
       
       // 認証情報を適用
-      if (configData.twitterCredentials) {
-        CONFIG.twitterCredentials = configData.twitterCredentials;
+      if (configData.twitterCookie) {
+        CONFIG.twitterCookie = configData.twitterCookie;
       }
       
       return true;
@@ -64,168 +66,103 @@ function log(message) {
   fs.appendFileSync(CONFIG.logFile, logMessage);
 }
 
-// 処理済みツイートの読み込み
-async function loadProcessedTweets() {
-  try {
-    if (await fs.pathExists(CONFIG.processedTweetsFile)) {
-      return await fs.readJSON(CONFIG.processedTweetsFile);
-    }
-  } catch (error) {
-    log(`処理済みツイートファイルの読み込みに失敗しました: ${error.message}`);
-  }
-  return { successful: {}, failed: {}, noMedia: {} };
+// URLからファイル名を抽出
+function extractFilenameFromUrl(url) {
+  const urlObj = new URL(url);
+  const pathParts = urlObj.pathname.split('/');
+  return pathParts[pathParts.length - 1];
 }
 
-// 処理済みツイートの保存
-async function saveProcessedTweets(processed) {
+// ツイートの状態を取得
+async function getTweetStatus(tweetId) {
+  const tweetDir = path.join(CONFIG.outputDir, tweetId);
+  const tweetFile = path.join(tweetDir, `${tweetId}.json`);
+
+  // ディレクトリが存在しない場合
+  if (!await fs.pathExists(tweetDir)) {
+    return { status: STATUS.PENDING, metadata: { reason: 'ディレクトリが存在しません' } };
+  }
+
+  // JSONファイルが存在しない場合
+  if (!await fs.pathExists(tweetFile)) {
+    return { status: STATUS.PENDING, metadata: { reason: 'JSONファイルが存在しません' } };
+  }
+
   try {
-    await fs.writeJSON(CONFIG.processedTweetsFile, processed, { spaces: 2 });
+    const data = await fs.readJSON(tweetFile);
+    const files = await fs.readdir(tweetDir);
+    const mediaFiles = files.filter(file => 
+      file !== `${tweetId}.json` && 
+      !file.endsWith('.txt')
+    );
+
+    // メディアの有無を確認
+    if (!data.media || !Array.isArray(data.media) || data.media.length === 0) {
+      return { status: STATUS.NO_MEDIA, metadata: { reason: 'メディアが含まれていません' } };
+    }
+
+    // メディアファイルの存在を確認
+    const mediaCount = data.media.length;
+    const downloadedCount = mediaFiles.length;
+
+    if (downloadedCount === 0) {
+      return { status: STATUS.PENDING, metadata: { reason: 'メディアファイルがダウンロードされていません' } };
+    } else if (downloadedCount < mediaCount) {
+      return { status: STATUS.PARTIAL, metadata: { reason: '一部のメディアファイルがダウンロードされていません' } };
+    }
+
+    return { status: STATUS.SUCCESS, metadata: { mediaCount, downloadedCount } };
   } catch (error) {
-    log(`処理済みツイートファイルの保存に失敗しました: ${error.message}`);
+    return { status: STATUS.FAILED, metadata: { error: error.message } };
   }
 }
 
-// ツイートのダウンロード
-async function downloadTweet(tweetId, retryCount = 0) {
-  // 既存の状態を確認
-  const tweetStatus = await getTweetStatus(tweetId);
-  if (tweetStatus.status === SHARED_CONFIG.STATUS.SUCCESS) {
-    return { success: true, noMedia: false, rateLimit: false, authError: false, output: 'Already downloaded' };
-  }
-
-  return new Promise((resolve) => {
-    const twmdPath = path.join(__dirname, 'twitter-media-downloader.exe');
-    const outputPath = path.join(CONFIG.outputDir, tweetId);
-
-    // フォルダがなければ作成
-    fs.ensureDirSync(outputPath);
-
-    // コマンドライン引数の準備
-    const args = ['-t', tweetId, '-o', outputPath, '-a'];
-    
-    // 認証情報があれば追加
-    if (CONFIG.twitterCredentials && CONFIG.twitterCredentials.username && CONFIG.twitterCredentials.password) {
-      args.push('-u', CONFIG.twitterCredentials.username);
-      args.push('-p', CONFIG.twitterCredentials.password);
-    }
-
-    const process = spawn(twmdPath, args);
-
-    let output = '';
-
-    process.stdout.on('data', (data) => {
-      output += data.toString();
-    });
-
-    process.stderr.on('data', (data) => {
-      output += data.toString();
-    });
-
-    process.on('close', async (code) => {
-      const hasError = code !== 0;
-      const hasNoMedia = output.includes('No media found') || output.includes('contains no media');
-      const isRateLimit = output.includes('response status 429 Too Many Requests') || 
-                        output.includes('Rate limit exceeded');
-      const isAuthError = output.includes('Authentication failed') || 
-                       output.includes('Login failed') ||
-                       output.includes('Unauthorized') ||
-                       output.includes('Invalid credentials');
-      
-      // メディアファイルの存在確認
-      const mediaFiles = fs.readdirSync(outputPath).filter(file => 
-        file !== `${tweetId}.json` && 
-        !file.endsWith('.txt')
-      );
-      
-      let status;
-      if (isAuthError) {
-        status = SHARED_CONFIG.STATUS.ERROR;
-      } else if (isRateLimit && retryCount < CONFIG.maxRateLimitRetries) {
-        status = SHARED_CONFIG.STATUS.PENDING;
-      } else if (hasNoMedia) {
-        status = SHARED_CONFIG.STATUS.NO_MEDIA;
-      } else if (hasError) {
-        // エラーでも一部のメディアがダウンロードされている可能性がある
-        if (mediaFiles.length > 0) {
-          status = SHARED_CONFIG.STATUS.PARTIAL;
-        } else {
-          status = SHARED_CONFIG.STATUS.FAILED;
-        }
-      } else {
-        // 成功の場合でも、すべてのメディアがダウンロードされているか確認
-        const tweetData = JSON.parse(fs.readFileSync(path.join(outputPath, `${tweetId}.json`), 'utf8'));
-        const expectedMediaCount = tweetData.media ? tweetData.media.length : 0;
-        if (mediaFiles.length > 0 && mediaFiles.length < expectedMediaCount) {
-          status = SHARED_CONFIG.STATUS.PARTIAL;
-        } else {
-          status = SHARED_CONFIG.STATUS.SUCCESS;
-        }
-      }
-
-      await updateTweetStatus(tweetId, status, {
-        retryCount,
-        output,
-        hasError,
-        hasNoMedia,
-        isRateLimit,
-        isAuthError,
-        mediaFiles: mediaFiles.length,
-        expectedMediaCount: tweetData?.media?.length || 0
-      });
-
-      resolve({ 
-        success: status === SHARED_CONFIG.STATUS.SUCCESS || status === SHARED_CONFIG.STATUS.PARTIAL, 
-        noMedia: status === SHARED_CONFIG.STATUS.NO_MEDIA, 
-        rateLimit: isRateLimit,
-        authError: isAuthError,
-        partial: status === SHARED_CONFIG.STATUS.PARTIAL,
-        output 
-      });
-    });
-  });
-}
-
-// like.jsからツイートIDを抽出
-async function extractTweetIds() {
-  log('like.jsファイルを読み込み中...');
-  
-  // ファイル全体を読み込む
-  const content = await fs.readFile(CONFIG.likeJsPath, 'utf8');
-  
-  // "window.YTD.like.part0 = " の部分を取り除く
-  let jsonContent;
+// ファイルをダウンロードする関数
+async function downloadFile(url, outputPath) {
   try {
-    // JavaScriptの代入式からJSONデータ部分を抽出
-    const match = content.match(/^window\.YTD\.like\.part0\s*=\s*(.+)/s);
-    if (match && match[1]) {
-      jsonContent = match[1].trim();
-      // 末尾にセミコロンがある場合は削除
-      if (jsonContent.endsWith(';')) {
-        jsonContent = jsonContent.slice(0, -1);
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
       }
-    } else {
-      throw new Error('期待されるフォーマットではありません');
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to download file: ${response.status} ${response.statusText}`);
     }
-    
-    // JSONとして解析
-    const data = JSON.parse(jsonContent);
-    
-    // ツイートIDを抽出
-    const tweetIds = [];
-    if (Array.isArray(data)) {
-      for (const item of data) {
-        if (item && item.like && item.like.tweetId) {
-          tweetIds.push(item.like.tweetId);
-        }
-      }
-    }
-    
-    log(`${tweetIds.length}件のツイートIDを抽出しました`);
-    return tweetIds;
-    
+
+    // arrayBufferを使用してデータを取得
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    await fs.writeFile(outputPath, buffer);
   } catch (error) {
-    log(`JSONデータの解析に失敗しました: ${error.message}`);
+    if (error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT') {
+      // ネットワークエラーの場合は少し待って再試行
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      return downloadFile(url, outputPath);
+    }
     throw error;
+  }
+}
+
+// メディアのダウンロード
+async function downloadMedia(mediaInfo) {
+  try {
+    const url = mediaInfo.media.type === 'image' ? mediaInfo.media.image : mediaInfo.videoUrl;
+    await downloadFile(url, mediaInfo.filePath);
+    log(`メディアファイルをダウンロードしました: ${mediaInfo.tweetId} - ${path.basename(mediaInfo.filePath)}`);
+    
+    // ツイートの状態を更新
+    const tweetStatus = await getTweetStatus(mediaInfo.tweetId);
+    if (tweetStatus.status === STATUS.SUCCESS) {
+      log(`ツイート ${mediaInfo.tweetId} のすべてのメディアがダウンロードされました`);
+    } else if (tweetStatus.status === STATUS.PARTIAL) {
+      log(`ツイート ${mediaInfo.tweetId} の一部のメディアがダウンロードされました`);
+    }
+    
+    return true;
+  } catch (error) {
+    log(`メディアファイルのダウンロードに失敗しました: ${mediaInfo.tweetId} - ${error.message}`);
+    return false;
   }
 }
 
@@ -236,107 +173,53 @@ async function main() {
     const configLoaded = loadConfig();
     if (configLoaded) {
       log('設定ファイルから設定を読み込みました');
-      
-      // 認証情報の確認
-      if (CONFIG.twitterCredentials.username && CONFIG.twitterCredentials.password) {
-        log(`ユーザー "${CONFIG.twitterCredentials.username}" としてログインします`);
-      } else {
-        log('認証情報が設定されていません。匿名モードで実行します');
-      }
     } else {
       log('設定ファイルが見つからないため、デフォルト設定で実行します');
+    }
+
+    // 認証情報の確認
+    if (CONFIG.twitterCookie) {
+      log('Twitter Cookieが設定されています');
+    } else {
+      log('警告: Twitter Cookieが設定されていません。一部のツイートがダウンロードできない可能性があります');
     }
 
     // 出力ディレクトリの作成
     await fs.ensureDir(CONFIG.outputDir);
 
-    // 処理済みツイートの読み込み
-    const processed = await loadProcessedTweets();
-    
-    log('ツイートIDの抽出を開始します...');
-    
-    // ツイートIDの抽出
-    const allTweetIds = await extractTweetIds();
-    
-    // 未処理のツイートをフィルタリング
-    const tweetIds = [];
-    for (const tweetId of allTweetIds) {
-      const status = await getTweetStatus(tweetId);
-      if (status.status === SHARED_CONFIG.STATUS.PENDING) {
-        tweetIds.push(tweetId);
-      }
-    }
-    
-    log(`未処理のツイート: ${tweetIds.length}件`);
-    
+    // 未ダウンロードのメディアを検出
+    log('未ダウンロードのメディアを検出中...');
+    const undownloadedMedia = await findUndownloadedMedia();
+    log(`未ダウンロードのメディア: ${undownloadedMedia.length}件`);
+
     // バッチ処理
-    for (let i = 0; i < tweetIds.length; i += CONFIG.batchSize) {
-      const batch = tweetIds.slice(i, i + CONFIG.batchSize);
-      log(`バッチ処理開始: ${i+1}～${Math.min(i+CONFIG.batchSize, tweetIds.length)}/${tweetIds.length}`);
+    for (let i = 0; i < undownloadedMedia.length; i += CONFIG.batchSize) {
+      const batch = undownloadedMedia.slice(i, i + CONFIG.batchSize);
+      log(`バッチ処理開始: ${i+1}～${Math.min(i+CONFIG.batchSize, undownloadedMedia.length)}/${undownloadedMedia.length}`);
       
-      for (const tweetId of batch) {
-        log(`ツイート処理開始: ${tweetId}`);
-        
-        try {
-          const result = await downloadTweet(tweetId);
-          
-          if (result.success) {
-            processed.successful[tweetId] = new Date().toISOString();
-            log(`成功: ${tweetId}`);
-          } else if (result.noMedia) {
-            processed.noMedia[tweetId] = new Date().toISOString();
-            log(`メディアなし: ${tweetId}`);
-          } else if (result.authError) {
-            log(`認証エラー: ${tweetId} - ${result.output}`);
-            log('Twitter認証に失敗しました。config.jsonの認証情報を確認してください');
-            processed.failed[tweetId] = new Date().toISOString();
-            // 認証エラーが発生した場合は処理を中止
-            return;
-          } else if (result.rateLimit) {
-            log(`レート制限: ${tweetId} - ${result.output}`);
-            log(`レート制限のため${CONFIG.rateLimitWaitTime}ミリ秒待機します...`);
-            await new Promise(resolve => setTimeout(resolve, CONFIG.rateLimitWaitTime));
-            log(`再試行: ${tweetId} (${result.retryCount}/${CONFIG.maxRateLimitRetries})`);
-            const retryResult = await downloadTweet(tweetId, result.retryCount);
-            if (retryResult.success) {
-              processed.successful[tweetId] = new Date().toISOString();
-              log(`成功: ${tweetId}`);
-            } else if (retryResult.noMedia) {
-              processed.noMedia[tweetId] = new Date().toISOString();
-              log(`メディアなし: ${tweetId}`);
-            } else {
-              processed.failed[tweetId] = new Date().toISOString();
-              log(`失敗: ${tweetId} - ${retryResult.output}`);
-            }
-          } else {
-            processed.failed[tweetId] = new Date().toISOString();
-            log(`失敗: ${tweetId} - ${result.output}`);
-          }
-        } catch (error) {
-          processed.failed[tweetId] = new Date().toISOString();
-          log(`エラー: ${tweetId} - ${error.message}`);
+      let successCount = 0;
+      let failureCount = 0;
+      
+      for (const mediaInfo of batch) {
+        const success = await downloadMedia(mediaInfo);
+        if (success) {
+          successCount++;
+        } else {
+          failureCount++;
         }
-        
-        // 各ダウンロード後に処理済みツイートを保存
-        await saveProcessedTweets(processed);
       }
+      
+      // バッチの結果を表示
+      log(`バッチ処理完了: 成功 ${successCount}件, 失敗 ${failureCount}件`);
       
       // バッチ間の待機（最後のバッチ以外）
-      if (i + CONFIG.batchSize < tweetIds.length) {
+      if (i + CONFIG.batchSize < undownloadedMedia.length) {
         log(`次のバッチまで${CONFIG.batchDelay}ミリ秒待機します...`);
         await new Promise(resolve => setTimeout(resolve, CONFIG.batchDelay));
       }
     }
     
-    // 統計情報の表示
-    const stats = await getStats();
-    log('処理完了:');
-    log(`- 成功: ${stats.successful}件`);
-    log(`- 失敗: ${stats.failed}件`);
-    log(`- メディアなし: ${stats.noMedia}件`);
-    log(`- エラー: ${stats.error}件`);
-    log(`- 保留中: ${stats.pending}件`);
-    log(`- 合計: ${stats.total}件`);
+    log('処理完了');
     
   } catch (error) {
     log(`予期せぬエラーが発生しました: ${error.message}`);

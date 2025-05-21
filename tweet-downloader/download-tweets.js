@@ -2,35 +2,130 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const { TwitterDL } = require('twitter-downloader');
-const { CONFIG: SHARED_CONFIG, updateTweetStatus, getTweetStatus, getStats } = require(path.join(__dirname, '..', 'shared', 'shared-state'));
 const cliProgress = require('cli-progress');
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') }); // .env ファイルを読み込む
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 // --- 設定 ---
-const LIKES_FILE_PATH = path.join(__dirname, '..', 'shared', 'like.js'); // like.js ファイルへのパス
-const DOWNLOADS_DIR = SHARED_CONFIG.downloadsDir; // 保存先ディレクトリ
-const ERROR_TWEETS_FILE = path.join(__dirname, 'error_tweets.json'); // エラーが発生したツイートIDリストの保存先
-const STATE_FILE = path.join(__dirname, 'rate_limit_state.json'); // レート制限状態の保存先
-const FIXED_WAIT_TIME_MS = 0; // 固定待機時間 (0ミリ秒)
-const RATE_LIMIT_WAIT_TIME_MS = 15 * 60 * 1000; // レート制限時の待機時間 (15分)
-const TWITTER_COOKIE = process.env.TWITTER_COOKIE || ''; // TwitterのCookie
-const HISTORY_LIMIT = 50; // 保持する履歴の最大件数
-// --- 設定ここまで ---
+const LIKES_FILE_PATH = path.join(__dirname, '..', 'shared', 'like.js');
+const DOWNLOADS_DIR = path.join(__dirname, '..', 'downloads');
+const ERROR_TWEETS_FILE = path.join(__dirname, 'error_tweets.json');
+const STATE_FILE = path.join(__dirname, 'rate_limit_state.json');
+const FIXED_WAIT_TIME_MS = 0;
+const RATE_LIMIT_WAIT_TIME_MS = 15 * 60 * 1000;
+const TWITTER_COOKIE = process.env.TWITTER_COOKIE || '';
+const HISTORY_LIMIT = 50;
+
+// ツイートの状態定数
+const STATUS = {
+    PENDING: 'pending',
+    SUCCESS: 'success',
+    PARTIAL: 'partial',
+    FAILED: 'failed',
+    NO_MEDIA: 'no_media'
+};
 
 // --- グローバル状態変数 ---
 let errorTweetIds = new Set();
 let rateLimitState = {
-    lastRateLimitTimestamp: null, // 最後にレート制限が発生した時刻
-    rateLimitHistory: [], // レート制限発生時の履歴 [{ timestamp }]
-    successHistory: [], // 成功時の履歴 [{ timestamp }]
-    startTime: null, // 開始時刻を追加
+    lastRateLimitTimestamp: null,
+    rateLimitHistory: [],
+    successHistory: [],
+    startTime: null,
 };
 let downloadStartTime = null;
-// --- グローバル状態変数ここまで ---
 
-// --- より正確な待機時間計算用 ---
-// （削除済み: 直近N回のリクエスト履歴による平均計算）
-// --- より正確な待機時間計算用ここまで ---
+// ツイートの状態を取得
+async function getTweetStatus(tweetId) {
+    const tweetDir = path.join(DOWNLOADS_DIR, tweetId);
+    const tweetFile = path.join(tweetDir, `${tweetId}.json`);
+
+    // ディレクトリが存在しない場合
+    if (!fs.existsSync(tweetDir)) {
+        return { status: STATUS.PENDING, metadata: { reason: 'ディレクトリが存在しません' } };
+    }
+
+    // JSONファイルが存在しない場合
+    if (!fs.existsSync(tweetFile)) {
+        return { status: STATUS.PENDING, metadata: { reason: 'JSONファイルが存在しません' } };
+    }
+
+    try {
+        const data = JSON.parse(fs.readFileSync(tweetFile, 'utf8'));
+        const files = fs.readdirSync(tweetDir).filter(file => 
+            file !== `${tweetId}.json` && 
+            !file.endsWith('.txt')
+        );
+
+        // メディアの有無を確認
+        if (!data.media || !Array.isArray(data.media) || data.media.length === 0) {
+            return { status: STATUS.NO_MEDIA, metadata: { reason: 'メディアが含まれていません' } };
+        }
+
+        // メディアファイルの存在を確認
+        const mediaCount = data.media.length;
+        const downloadedCount = files.length;
+
+        if (downloadedCount === 0) {
+            return { status: STATUS.PENDING, metadata: { reason: 'メディアファイルがダウンロードされていません' } };
+        } else if (downloadedCount < mediaCount) {
+            return { status: STATUS.PARTIAL, metadata: { reason: '一部のメディアファイルがダウンロードされていません' } };
+        }
+
+        return { status: STATUS.SUCCESS, metadata: { mediaCount, downloadedCount } };
+    } catch (error) {
+        return { status: STATUS.FAILED, metadata: { error: error.message } };
+    }
+}
+
+// 統計情報を取得
+async function getStats() {
+    const stats = {
+        total: 0,
+        successful: 0,
+        partial: 0,
+        failed: 0,
+        noMedia: 0,
+        pending: 0,
+        error: 0
+    };
+
+    try {
+        const dirs = fs.readdirSync(DOWNLOADS_DIR)
+            .filter(item => {
+                const fullPath = path.join(DOWNLOADS_DIR, item);
+                return fs.statSync(fullPath).isDirectory();
+            });
+
+        stats.total = dirs.length;
+
+        for (const tweetId of dirs) {
+            const status = await getTweetStatus(tweetId);
+            switch (status.status) {
+                case STATUS.SUCCESS:
+                    stats.successful++;
+                    break;
+                case STATUS.PARTIAL:
+                    stats.partial++;
+                    break;
+                case STATUS.FAILED:
+                    stats.failed++;
+                    break;
+                case STATUS.NO_MEDIA:
+                    stats.noMedia++;
+                    break;
+                case STATUS.PENDING:
+                    stats.pending++;
+                    break;
+                default:
+                    stats.error++;
+            }
+        }
+    } catch (error) {
+        console.error(`統計情報の取得中にエラーが発生しました: ${error.message}`);
+    }
+
+    return stats;
+}
 
 // エラーが発生したツイートIDのリストをロード
 if (fs.existsSync(ERROR_TWEETS_FILE)) {
@@ -235,10 +330,9 @@ async function downloadTweets() {
         return;
     }
 
-    downloadStartTime = Date.now(); // 処理開始時刻を記録
-
-    loadRateLimitState(); // 状態をロード
-    rateLimitState.startTime = downloadStartTime; // 開始時刻を記録
+    downloadStartTime = Date.now();
+    loadRateLimitState();
+    rateLimitState.startTime = downloadStartTime;
 
     const tweetIds = await extractTweetIds(LIKES_FILE_PATH);
     let skippedDownloaded = 0;
@@ -261,10 +355,15 @@ async function downloadTweets() {
 
         // 既存の状態を確認
         const tweetStatus = await getTweetStatus(tweetId);
-        if (tweetStatus.status === SHARED_CONFIG.STATUS.SUCCESS || 
-            tweetStatus.status === SHARED_CONFIG.STATUS.PARTIAL) {
+        if (tweetStatus.status === STATUS.SUCCESS || 
+            tweetStatus.status === STATUS.PARTIAL) {
             skippedDownloaded++;
-            progressBar.update(i + 1, { currentTweet: tweetId, download: downloadedCount, skipped: (skippedDownloaded + skippedError), rate: (i + 1) / ((Date.now() - downloadStartTime) / 60000) });
+            progressBar.update(i + 1, { 
+                currentTweet: tweetId, 
+                download: downloadedCount, 
+                skipped: (skippedDownloaded + skippedError), 
+                rate: (i + 1) / ((Date.now() - downloadStartTime) / 60000) 
+            });
             continue;
         }
 
@@ -273,7 +372,12 @@ async function downloadTweets() {
 
         if (isInErrorList) {
             skippedError++;
-            progressBar.update(i + 1, { currentTweet: tweetId, download: downloadedCount, skipped: (skippedDownloaded + skippedError), rate: (i + 1) / ((Date.now() - downloadStartTime) / 60000) });
+            progressBar.update(i + 1, { 
+                currentTweet: tweetId, 
+                download: downloadedCount, 
+                skipped: (skippedDownloaded + skippedError), 
+                rate: (i + 1) / ((Date.now() - downloadStartTime) / 60000) 
+            });
             continue;
         }
 
@@ -296,7 +400,7 @@ async function downloadTweets() {
             if (result.status === 'error') {
                 const { isRateLimit, reason } = checkRateLimit(result);
                 if (isRateLimit) {
-                    status = SHARED_CONFIG.STATUS.PENDING;
+                    status = STATUS.PENDING;
                     // レート制限の記録
                     rateLimitState.lastRateLimitTimestamp = Date.now();
                     rateLimitState.rateLimitHistory.push({
@@ -305,23 +409,23 @@ async function downloadTweets() {
                     });
                     saveRateLimitState();
                 } else if (hasMetadata && downloadedMedia > 0) {
-                    status = SHARED_CONFIG.STATUS.PARTIAL;
+                    status = STATUS.PARTIAL;
                 } else {
-                    status = SHARED_CONFIG.STATUS.FAILED;
+                    status = STATUS.FAILED;
                     errorTweetIds.add(tweetId);
                     saveErrorTweetIds();
                 }
             } else {
                 if (hasMetadata && hasMedia) {
                     if (downloadedMedia === metadata.media.length) {
-                        status = SHARED_CONFIG.STATUS.SUCCESS;
+                        status = STATUS.SUCCESS;
                     } else if (downloadedMedia > 0) {
-                        status = SHARED_CONFIG.STATUS.PARTIAL;
+                        status = STATUS.PARTIAL;
                     } else {
-                        status = SHARED_CONFIG.STATUS.FAILED;
+                        status = STATUS.FAILED;
                     }
                 } else {
-                    status = SHARED_CONFIG.STATUS.NO_MEDIA;
+                    status = STATUS.NO_MEDIA;
                 }
             }
 
@@ -333,7 +437,7 @@ async function downloadTweets() {
                 error: result.status === 'error' ? result.message : null
             });
 
-            if (status === SHARED_CONFIG.STATUS.SUCCESS || status === SHARED_CONFIG.STATUS.PARTIAL) {
+            if (status === STATUS.SUCCESS || status === STATUS.PARTIAL) {
                 downloadedCount++;
                 rateLimitState.successHistory.push({
                     timestamp: Date.now()
@@ -347,14 +451,20 @@ async function downloadTweets() {
             }
 
             // プログレスバー更新（ダウンロード・スキップ・レートを更新）
-            progressBar.update(i + 1, { currentTweet: tweetId, download: downloadedCount, skipped: skippedDownloaded, skippedError, rate: (i + 1) / ((Date.now() - downloadStartTime) / 60000) });
+            progressBar.update(i + 1, { 
+                currentTweet: tweetId, 
+                download: downloadedCount, 
+                skipped: skippedDownloaded, 
+                skippedError, 
+                rate: (i + 1) / ((Date.now() - downloadStartTime) / 60000) 
+            });
 
         } catch (error) {
             const { isRateLimit, reason } = checkRateLimit(null, error);
             let status;
             
             if (isRateLimit) {
-                status = SHARED_CONFIG.STATUS.PENDING;
+                status = STATUS.PENDING;
                 // レート制限の記録
                 rateLimitState.lastRateLimitTimestamp = Date.now();
                 rateLimitState.rateLimitHistory.push({
@@ -371,9 +481,9 @@ async function downloadTweets() {
                 ).length;
 
                 if (hasMetadata && downloadedMedia > 0) {
-                    status = SHARED_CONFIG.STATUS.PARTIAL;
+                    status = STATUS.PARTIAL;
                 } else {
-                    status = SHARED_CONFIG.STATUS.FAILED;
+                    status = STATUS.FAILED;
                     errorTweetIds.add(tweetId);
                     saveErrorTweetIds();
                 }
@@ -388,7 +498,13 @@ async function downloadTweets() {
                         !file.endsWith('.txt')
                     ).length : 0
             });
-            progressBar.update(i + 1, { currentTweet: tweetId, download: downloadedCount, skipped: skippedDownloaded, skippedError, rate: (i + 1) / ((Date.now() - downloadStartTime) / 60000) });
+            progressBar.update(i + 1, { 
+                currentTweet: tweetId, 
+                download: downloadedCount, 
+                skipped: skippedDownloaded, 
+                skippedError, 
+                rate: (i + 1) / ((Date.now() - downloadStartTime) / 60000) 
+            });
         }
     }
     progressBar.stop();
